@@ -1,0 +1,81 @@
+function clean_up_expired_transients() {
+    global $wpdb;
+    $current_time = time();
+    $sql = "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE '_transient_timeout_proxy_%'";
+    $results = $wpdb->get_results($sql);
+
+    foreach ($results as $result) {
+        if ($result->option_value < $current_time) {
+            // Delete the expired transient and its associated value
+            $transient_name = str_replace('_transient_timeout_', '', $result->option_name);
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s OR option_name = %s", '_transient_' . $transient_name, $result->option_name));
+        }
+    }
+}
+
+function block_proxy_ips() {
+    // Clean up expired transients
+    clean_up_expired_transients();
+
+    // List of user agents to allow through
+    $allowed_user_agents = [
+        'facebookexternalhit', // Facebook
+        'Facebot',             // Facebook
+        'Twitterbot',          // Twitter
+        'Discordbot',          // Discord
+        'Googlebot',           // Google
+        'Bingbot',             // Bing
+        'Slurp',               // Yahoo
+    ];
+
+    // Get the visitor's IP address considering Cloudflare
+    if (isset($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        $ip_address = $_SERVER['HTTP_CF_CONNECTING_IP'];
+    } else {
+        $ip_address = $_SERVER['REMOTE_ADDR'];
+    }
+
+    // Get the user agent
+    $user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+
+    // Check if the user agent is in the list of allowed user agents
+    foreach ($allowed_user_agents as $allowed_user_agent) {
+        if (stripos($user_agent, $allowed_user_agent) !== false) {
+            // If the user agent is allowed, exit the function
+            return;
+        }
+    }
+
+    // Check if the result is already cached
+    $transient_key = 'proxy_check_' . $ip_address;
+    $is_proxy = get_transient($transient_key);
+
+    if ($is_proxy === false) {
+        // API to check if IP is a proxy
+        $api_url = 'https://proxycheck.io/v2/' . $ip_address . '?key=YOUR_KEY_HERE&vpn=1&asn=1';
+
+        // Make an API request to check the IP
+        $response = wp_remote_get($api_url);
+
+        if (is_wp_error($response)) {
+            // Handle error in the API request
+            return;
+        }
+
+        $body = wp_remote_retrieve_body($response);
+        $data = json_decode($body, true);
+
+        // Check if the IP is a proxy and store the result in a transient
+        $is_proxy = isset($data[$ip_address]['proxy']) && $data[$ip_address]['proxy'] == 'yes';
+
+        // Store the result in a transient for 24 hours
+        set_transient($transient_key, $is_proxy, DAY_IN_SECONDS);
+    }
+
+    // Block access if the IP is a proxy
+    if ($is_proxy) {
+        // Redirect to a custom error page or show a message
+        wp_die('Access Denied. Proxy IPs are not allowed.');
+    }
+}
+add_action('init', 'block_proxy_ips');
